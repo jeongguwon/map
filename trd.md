@@ -12,13 +12,13 @@ flowchart LR
     Frontend -->|내부 API 호출| Backend[백엔드 API 프록시]
     Backend -->|카테고리/장소 검색| MapAPI[지도·장소 검색 API]
     Backend -->|도보 경로 계산| RouteAPI[도보 경로 API]
-    Backend -->|2단계| TransitAPI[대중교통 API]
+    Backend -->|3단계| TransitAPI[대중교통 API]
     Backend --> Cache[(응답 캐시)]
 ```
 
 - **프론트엔드**: 지도 렌더링, 카테고리 UI, 장소·경로 패널을 담당하는 SPA. 외부 지도 API 키(공개 가능한 JS 키)는 도메인 제한을 걸어 클라이언트에서 직접 사용하고, 장소 검색·경로 계산처럼 비밀 키가 필요한 호출은 백엔드를 경유한다.
 - **백엔드(API 프록시)**: 외부 API 비밀 키 보관, 요청 검증, 응답 정규화(제공사별 응답 스키마 차이를 내부 공통 스키마로 변환), 캐싱, 호출량 제한(rate limit) 담당.
-- **외부 API**: 지도·장소 검색, 도보 경로, (2단계) 대중교통 API. 제공사가 서로 다를 수 있음을 전제로 어댑터 패턴으로 분리한다.
+- **외부 API**: 지도·장소 검색, 도보 경로, (3단계) 대중교통 API. 제공사가 서로 다를 수 있음을 전제로 어댑터 패턴으로 분리한다.
 
 ## 3. 기술 스택 (PoC 후보)
 
@@ -27,7 +27,7 @@ flowchart LR
 | 프론트엔드 | React 또는 Vue 기반 SPA (반응형) | 데스크톱 우선 최적화, 모바일 브레이크포인트 대응 |
 | 지도 렌더링·장소 검색 | Kakao Maps JS API + Kakao Local API (대안: Naver Maps) | 카테고리 코드 검색 가능 여부로 1차 후보 |
 | 도보 경로 계산 | Tmap 보행자 경로 API (대안: ODsay) | Kakao/Naver는 공개 보행자 경로 API 미제공 확인됨 |
-| 대중교통 경로 (2단계) | ODsay 대중교통 길찾기 API | 도보 구간 포함 응답 제공 |
+| 대중교통 경로 (3단계) | ODsay 대중교통 길찾기 API | 도보 구간 포함 응답 제공 |
 | 백엔드 | Node.js(Express) 또는 서버리스 함수 | API 키 보관 및 프록시 용도, 상태 저장 최소화 |
 | 캐시 | 인메모리 캐시(개발) → Redis(운영, 트래픽 증가 시) | 동일 좌표·카테고리 반복 조회 비용 절감 |
 | 배포 | 정적 호스팅(프론트) + 서버리스/컨테이너(백엔드) | 초기 비용 최소화 우선 |
@@ -54,20 +54,33 @@ WalkingRouteProvider
 
 | FR | 필요 API 기능 |
 | --- | --- |
+| FR-1 (지도 표시) | 지도 렌더링 API 초기화 (별도 백엔드 연동 불필요) |
 | FR-2 (현재 위치) | 브라우저 Geolocation API |
 | FR-3, FR-4 (카테고리 장소 검색) | `PlaceSearchProvider.searchByCategory` |
 | FR-5 (화면 영역 재조회) | 지도 이동 이벤트 + `searchByCategory` 재호출(디바운스 적용) |
 | FR-6 (장소 상세) | 장소 검색 API 응답의 상세 필드 |
 | FR-7 (키워드 검색) | `PlaceSearchProvider.searchByKeyword` |
+| FR-8~FR-11 (지도 디자인·마커 스타일) | 지도 API 자체 스타일링/마커 기능 사용, 별도 백엔드 연동 불필요 |
 | FR-12, FR-13 (도보 경로) | `WalkingRouteProvider.getWalkingRoute` |
-| FR-14 (최단 경로 추천) | 경로 결과 중 `duration` 최소값 선택 |
+| FR-14 (최단 경로 추천) | 경로 결과 중 `duration` 최소값 선택 (MVP는 도보 단일 결과이므로 별도 비교 로직 불필요, 3단계부터 다중 모드 비교 로직 필요) |
+| FR-16 (경로 상세 정보 표시) | `RouteResult`의 `durationSeconds`/`distanceMeters`/`transferCount`/`walkingDurationSeconds` 필드 사용. MVP(도보 전용)는 `transferCount=0`, `durationSeconds===walkingDurationSeconds`로 계산(별도 API 불필요) |
 | FR-17 (경로 지도 표시) | 경로 API의 polyline/좌표 배열 |
-| FR-15, FR-18, FR-19 (2단계 대중교통) | 대중교통 API 연동 (3단계에서 구현) |
+| FR-15, FR-18, FR-19 (3단계 대중교통) | 대중교통 API 연동 (3단계에서 구현) |
 | FR-20 (실시간 데이터 실패 시 대체 표시) | API 오류/타임아웃 처리 + 마지막 캐시 갱신 시각 표시 |
 
 ## 5. 데이터 모델 (내부 공통 스키마)
 
 ```
+type CategoryCode =
+  | "convenience_store"   // 편의점 - 코드 검색
+  | "restaurant"          // 식당 - 코드 검색
+  | "mart"                // 마트 - 코드 검색
+  | "school"              // 학교 - 코드 검색
+  | "cafe"                // 카페 - 코드 검색
+  | "pc_room"             // PC방 - 코드 없음, 키워드 검색으로 대체(PRD 6장)
+  | "movie_theater"       // 영화관 - 코드 검색
+  | "park"                // 공원 - 코드 검색
+
 Place {
   id: string
   name: string
@@ -85,7 +98,8 @@ RouteResult {
   mode: "walk" | "bus" | "subway" | "mixed"
   durationSeconds: number
   distanceMeters: number
-  transferCount: number
+  transferCount: number            // MVP(도보 전용)에서는 항상 0(FR-16)
+  walkingDurationSeconds: number   // 전체 경로 중 도보 구간 합계, MVP에서는 durationSeconds와 동일(FR-16, FR-19)
   steps: RouteStep[]
   isRealtime: boolean
   lastUpdatedAt: string    // ISO8601, 실시간 데이터 불가 시 대체 표시용(FR-20)
@@ -93,9 +107,11 @@ RouteResult {
 
 RouteStep {
   mode: "walk" | "bus" | "subway"
+  durationSeconds: number
+  waitDurationSeconds?: number     // 버스/지하철 대기 시간(3단계, FR-19)
   polyline: LatLng[]
-  lineName?: string        // 지하철 노선명 등 (2단계)
-  routeNumber?: string     // 버스 번호 등 (2단계)
+  lineName?: string        // 지하철 노선명 등 (3단계)
+  routeNumber?: string     // 버스 번호 등 (3단계)
   startPoint: LatLng
   endPoint: LatLng
 }
